@@ -1,0 +1,6 @@
+.venv
+.idea
+.env
+.service_account.json
+__pycache__
+test.py
