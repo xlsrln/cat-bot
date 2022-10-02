@@ -6,4 +6,6 @@ TODO:
 
 
 Features to add:
+* Add powerstage times to event submission (optional)
 * Gather standings by tournament
+* Add a discord View inorder to make ephemeral messages have a shorter timeout

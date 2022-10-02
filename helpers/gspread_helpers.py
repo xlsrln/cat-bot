@@ -1,4 +1,3 @@
-import datetime
 from typing import List, Any
 
 import gspread
@@ -30,8 +29,8 @@ def worksheet_exists(sh: gspread.spreadsheet.Spreadsheet, worksheet_title: str) 
     return worksheet_title in [ws.title for ws in sh.worksheets()]
 
 
-def create_spreadsheet_if_not_exists(gc: gspread.client.Client, sh_name: str,
-                                     writers: List[str]) -> gspread.spreadsheet.Spreadsheet:
+def get_or_create_spreadsheet(gc: gspread.client.Client, sh_name: str,
+                              writers: List[str]) -> gspread.spreadsheet.Spreadsheet:
     """Create a spreadsheet if the name is not already occupied, otherwise return existing spreadsheet
 
     Args:
@@ -58,8 +57,8 @@ def create_spreadsheet_if_not_exists(gc: gspread.client.Client, sh_name: str,
     return sh
 
 
-def create_worksheet_if_not_exists(sh: gspread.spreadsheet.Spreadsheet, ws_title: str,
-                                   headers: List[str]) -> gspread.worksheet.Worksheet:
+def get_or_create_worksheet(sh: gspread.spreadsheet.Spreadsheet, ws_title: str,
+                            headers: List[str]) -> gspread.worksheet.Worksheet:
     """Create a worksheet if the title is not already occupied, otherwise return existing worksheet
 
     Args:
@@ -92,7 +91,7 @@ def get_header(ws: gspread.worksheet.Worksheet) -> List[str]:
     Returns:
         A list of headers
     """
-    return ws.get("1:1")[0]
+    return ws.row_values(1)
 
 
 def safe_append_row(ws: gspread.worksheet.Worksheet, row: List[Any]):
@@ -112,3 +111,37 @@ def safe_append_row(ws: gspread.worksheet.Worksheet, row: List[Any]):
 
     # Append row as user input to allow for formatting by google sheets
     ws.append_row(row, value_input_option=gspread.worksheet.ValueInputOption.user_entered)
+
+
+def get_values_by_header(ws: gspread.worksheet.Worksheet, header: str) -> List[Any]:
+    """ Get all values with the provided header
+
+    Args:
+        ws: A gspread Worksheet
+        header: A name of a header
+
+    Returns:
+        A list of values under the supplied header in the worksheet
+
+    Raises:
+        ValueError: If the header can not be found in the worksheet
+    """
+    headers = get_header(ws)
+    try:
+        col_idx = headers.index(header) + 1  # Worksheets are 1-indexed
+    except ValueError:
+        raise ValueError("Header is not present in worksheet")
+
+    return ws.col_values(col_idx)[1:]
+
+
+def get_values(ws: gspread.worksheet.Worksheet) -> List[List[Any]]:
+    """ Returns all values except headers
+
+    Args:
+        ws: A gspread Worksheet
+
+    Returns:
+        A list of list with worksheet entries
+    """
+    return ws.get_values()[1:]
