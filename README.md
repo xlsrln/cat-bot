@@ -6,6 +6,7 @@ TODO:
 
 
 Features to add:
-* Add powerstage times to event submission (optional)
+* Load in data once, instead of multiple calls to worksheets.
+* Add tests
 * Gather standings by tournament
 * Add a discord View inorder to make ephemeral messages have a shorter timeout

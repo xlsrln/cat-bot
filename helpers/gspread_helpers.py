@@ -3,6 +3,15 @@ from typing import List, Any
 import gspread
 
 
+def str2bool(s: str) -> bool:
+    if s.lower() == "true":
+        return True
+    elif s.lower() == "false":
+        return False
+    else:
+        raise ValueError(f"Could not convert {s} to boolean")
+
+
 def spreadsheet_exists(gc: gspread.client.Client, sheet_name: str) -> bool:
     """Check if a spreadsheet exists
 
@@ -145,3 +154,21 @@ def get_values(ws: gspread.worksheet.Worksheet) -> List[List[Any]]:
         A list of list with worksheet entries
     """
     return ws.get_values()[1:]
+
+
+def get_first_row_where_header(ws: gspread.worksheet.Worksheet, header: str, value: Any) -> list:
+    """Returns all rows for where header has value
+
+    Args:
+        ws: A gspread Worksheet
+        header: Name of the header
+        value: Value to look for in header column
+
+    Returns:
+        A list with matching worksheet entries
+    """
+    try:
+        ind = get_values_by_header(ws, header).index(value)
+        return get_values(ws)[ind]
+    except ValueError:
+        return []
