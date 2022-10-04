@@ -1,6 +1,25 @@
 import datetime
+from typing import Callable, Any
 
 from pydantic.datetime_parse import parse_duration, parse_datetime
+
+
+def optional_wrapper(func: Callable) -> Callable:
+    """Wraps a validation function so that None types are converted to empty string
+
+    Args:
+        func: A function for validation
+
+    Returns:
+        A callable in which None is parsed to empty string
+    """
+
+    def _optional_wrapper(value: Any):
+        if value is None:
+            return ""
+        return func(value)
+
+    return _optional_wrapper
 
 
 def validate_time(time: str) -> str:

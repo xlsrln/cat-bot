@@ -7,15 +7,16 @@ Supports the following discord commands
 """
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, AnyHttpUrl
 import pydantic
 import discord
 from discord.ext import commands
 
-from helpers.pydantic_helpers import validate_datetime, validate_time
+from helpers.pydantic_helpers import validate_datetime, validate_time, optional_wrapper
 import helpers.gspread_helpers as gh
+from helpers.enums import WSEnum
 from gc_context import gc
 
 # TODO: Make a pydantic model and functions to parse from and to it instead. Or some ORM (see butterdb)
@@ -24,12 +25,20 @@ EVENT_SH_NAME = "EventSheetTest"
 EVENT_SH_WRITERS = [...]  # TODO: Fetch emails from config?
 EVENT_MASTER_ROLE_NAME = "EventMaster"  # TODO: Make this an id instead
 
-# Worksheet constants
-EVENT_WS_D_EVENT_TITLE = "d_event"
-EVENT_WS_D_EVENT_HEADERS = ["name"]
-EVENT_WS_F_EVENT_SUBMISSIONS_TITLE = "f_event_submissions"
-EVENT_WS_F_EVENT_SUBMISSIONS_HEADERS = ["name", "submission_datetime", "event", "time", "video_link"]
 
+# Worksheet Enums
+class DEvent(WSEnum):
+    event_name = 0
+    has_powerstage = 1
+
+
+class FEventSubmissions(WSEnum):
+    user_name = 0
+    submission_datetime = 1
+    event_name = 2
+    time = 3
+    video_link = 4
+    powerstage_time = 5
 
 async def get_event_names(ctx: discord.AutocompleteContext) -> List[str]:
     """Returns list to help autocomplete event names
@@ -41,8 +50,8 @@ async def get_event_names(ctx: discord.AutocompleteContext) -> List[str]:
         A list of events which matches the current text
     """
     sh = gh.get_or_create_spreadsheet(gc, EVENT_SH_NAME, EVENT_SH_WRITERS)
-    ws = gh.get_or_create_worksheet(sh, EVENT_WS_D_EVENT_TITLE, EVENT_WS_D_EVENT_HEADERS)
-    values = gh.get_values_by_header(ws, EVENT_WS_D_EVENT_HEADERS[0])
+    ws = gh.get_or_create_worksheet(sh, DEvent.title(), DEvent.headers())
+    values = gh.get_values_by_header(ws, DEvent.event_name.name)
     return [value for value in values if str(values).lower().startswith(ctx.value.lower())]
 
 
@@ -50,13 +59,16 @@ class EventSubmissionModel(BaseModel):
     """
     Pydantic data model for an event submission
     """
-    name: str
+    user_name: str
     submission_datetime: datetime
-    event: str
+    event_name: str
     time: str
     video_link: AnyHttpUrl
+    powerstage_time: Optional[str]
 
     _time_validator = pydantic.validator("time", allow_reuse=True)(validate_time)
+    _powerstage_time_validator = pydantic.validator("powerstage_time", allow_reuse=True)(
+        optional_wrapper(validate_time))
     _submission_datetime_validator = pydantic.validator("submission_datetime", allow_reuse=True)(validate_datetime)
 
 
@@ -83,84 +95,100 @@ class EventCommands(commands.Cog):
         await ctx.send_response(f"Spreadsheet available at: {self.sh.url}", ephemeral=True)
 
     @event_cmd_group.command()
-    @discord.option("name", description="Enter the name of the event")
+    @discord.option("event_name", description="Enter the name of the event")
+    @discord.option("has_powerstage", description="Enter the name of the event", input_type=bool)
     @commands.has_role(EVENT_MASTER_ROLE_NAME)
-    async def add(self, ctx: discord.ApplicationContext, name: str):
+    async def add(self, ctx: discord.ApplicationContext, event_name: str, has_powerstage: bool):
         """Command to add an event to the spreadsheet.
 
         Duplicate entries are not allowed. Only users with the EVENT_MASTER_ROLE_NAME role can add events.
 
         Args:
             ctx: A discord ApplicationContext
-            name: The name of the event
+            event_name: The name of the event
+            has_powerstage: A bool indicating if there's a powerstage in the event or not
         """
         # Add event worksheet if not exist
-        ws = gh.get_or_create_worksheet(self.sh, EVENT_WS_D_EVENT_TITLE, EVENT_WS_D_EVENT_HEADERS)
+        ws = gh.get_or_create_worksheet(self.sh, DEvent.title(), DEvent.headers())
 
-        row_entry = [name]
+        row_entry = [event_name, has_powerstage]
+
         # if the entry is already in the worksheet, don't add it
-        if row_entry in gh.get_values(ws):
-            await ctx.send_response(f"Event '{name}' already exists", ephemeral=True)
+        if row_entry[0] in gh.get_values_by_header(ws, DEvent.event_name.name):
+            await ctx.send_response(f"Event '{event_name}' already exists", ephemeral=True)
             return
 
         gh.safe_append_row(ws, row_entry)
-        await ctx.send_response(f"Added '{name}' as an event", ephemeral=True)
+        await ctx.send_response(f"Added '{event_name}' as an event", ephemeral=True)
 
     @event_cmd_group.command()
-    @discord.option("event", description="Enter the name of the event",
+    @discord.option("event_name", description="Enter the name of the event",
                     autocomplete=get_event_names)  # TODO: auto-complete is broken, but waiting for fix from pycord.
     @discord.option("time", description="Enter your time in format [H:]MM:SS.ff")
     @discord.option("video_link", description="Enter a HTTP/HTTPS URL to your recording")
-    async def submit(self, ctx: discord.ApplicationContext, event: str, time: str, video_link: str):
+    @discord.option("powerstage_time", description="Enter your powerstage time in format [H:]MM:SS.ff", required=False)
+    async def submit(self, ctx: discord.ApplicationContext, event_name: str, time: str, video_link: str,
+                     powerstage_time: str):
         """Command to submit an entry to an event
 
         Duplicate entries are not allowed. Only events present in the EVENT_WS_D_EVENT_TITLE table can be submitted to.
 
         Args:
             ctx: A discord ApplicationContext
-            event: The name of the event
+            event_name: The name of the event
             time: The time of the submission on the form HH+:MM:SS.ffff
             video_link: A HTTP/HTTPS URL
+            powerstage_time: The time on the powerstage on the form HH+:MM:SS.ffff.
+                If required in event but not entered the submission fails
         """
-        # TODO: Add powerstage time as input
-
+        await ctx.defer(ephemeral=True)
         # Validate data
         event_submission = EventSubmissionModel(
-            name=ctx.user.name,
+            user_name=ctx.user.name,
             submission_datetime=datetime.now(),
-            event=event,
+            event_name=event_name,
             time=time,
-            video_link=video_link
+            video_link=video_link,
+            powerstage_time=powerstage_time
         )
 
         row_entry = [
-            dict(event_submission)[header] for header in EVENT_WS_F_EVENT_SUBMISSIONS_HEADERS
+            dict(event_submission)[header] for header in FEventSubmissions.headers()
         ]  # Create entry with correct order
-        ws = gh.get_or_create_worksheet(self.sh, EVENT_WS_F_EVENT_SUBMISSIONS_TITLE,
-                                        EVENT_WS_F_EVENT_SUBMISSIONS_HEADERS)
+        f_event_sub_ws = gh.get_or_create_worksheet(self.sh, FEventSubmissions.title(),
+                                                    FEventSubmissions.headers())
 
         # If the event is not in the event dimension table, reject and inform the user
-        d_event_ws = gh.get_or_create_worksheet(self.sh, EVENT_WS_D_EVENT_TITLE, EVENT_WS_D_EVENT_HEADERS)
-        if event_submission.event not in (events := gh.get_values_by_header(d_event_ws, EVENT_WS_D_EVENT_HEADERS[0])):
-            await ctx.send_response(
-                f"Event {event_submission.event} has not been registered. These events are available: {events}",
-                ephemeral=True,
+        d_event_ws = gh.get_or_create_worksheet(self.sh, DEvent.title(), DEvent.headers())
+        if event_submission.event_name not in (events := gh.get_values_by_header(d_event_ws, DEvent.event_name.name)):
+            await ctx.followup.send(
+                f"Submission rejected :x: Event {event_name} has not been registered. These events are available: {events}",
+                ephemeral=True
             )
             return
 
         # If the exact entry already exists in the event submission fact table, reject and inform the user
-        if row_entry in gh.get_values(ws):
-            await ctx.send_response(
-                f"Event submission {dict(event_submission)} has already been submitted",
-                ephemeral=True,
+        if gh.get_first_row_where_header(f_event_sub_ws, FEventSubmissions.video_link.name, event_submission.video_link):
+            await ctx.followup.send(
+                f"Submission rejected :x: Video link {video_link} has already been submitted.",
+                ephemeral=True
+            )
+            return
+
+        # If the event has a powerstage and the powerstage time was not entered, reject.
+        event_row = gh.get_first_row_where_header(d_event_ws, DEvent.event_name.name, event_submission.event_name)
+        if event_row and gh.str2bool(event_row[DEvent.has_powerstage.value]) and not powerstage_time:
+            await ctx.followup.send(
+                f"Submission rejected :x: Event {event_name} requires powerstage_time to be entered",
+                ephemeral=True
             )
             return
 
         # Add event submission to the event submission fact table
-        gh.safe_append_row(ws, row_entry)
+        gh.safe_append_row(f_event_sub_ws, row_entry)
 
-        await ctx.send_response(
-            f"Event {dict(event_submission)} was submitted successfully",
+        await ctx.followup.send(
+            f"Submission accepted :white_check_mark: Event was submitted successfully",
             ephemeral=True,
         )
 
@@ -172,7 +200,7 @@ class EventCommands(commands.Cog):
             ctx: A discord ApplicationContext
             error: An exception
         """
-        await ctx.send_response(f"Error when calling /event spreadsheet: {str(error)}", ephemeral=True)
+        await ctx.send_response(f":warning: Unexpected error when calling /event spreadsheet: {str(error)}", ephemeral=True)
 
     @add.error
     async def add_error(self, ctx: discord.ApplicationContext, error: Exception):
@@ -182,7 +210,7 @@ class EventCommands(commands.Cog):
             ctx: A discord ApplicationContext
             error: An exception
         """
-        await ctx.send_response(f"Error when calling /event add: {str(error)}", ephemeral=True)
+        await ctx.send_response(f":warning: Unexpected error when calling /event add: {str(error)}", ephemeral=True)
 
     @submit.error
     async def submit_error(self, ctx: discord.ApplicationContext, error: Exception):
@@ -192,7 +220,7 @@ class EventCommands(commands.Cog):
             ctx: A discord ApplicationContext
             error: An exception
         """
-        await ctx.send_response(f"Error when calling /event submit: {str(error)}", ephemeral=True)
+        await ctx.followup.send(f":warning: Unexpected error when calling /event submit: {str(error)}", ephemeral=True)
 
 
 def setup(bot: discord.Bot):
