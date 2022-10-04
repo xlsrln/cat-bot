@@ -157,7 +157,7 @@ def get_values(ws: gspread.worksheet.Worksheet) -> List[List[Any]]:
 
 
 def get_first_row_where_header(ws: gspread.worksheet.Worksheet, header: str, value: Any) -> list:
-    """Returns all rows for where header has value
+    """Returns first row for where header has value
 
     Args:
         ws: A gspread Worksheet
@@ -172,3 +172,26 @@ def get_first_row_where_header(ws: gspread.worksheet.Worksheet, header: str, val
         return get_values(ws)[ind]
     except ValueError:
         return []
+
+
+def get_rows_where_header(ws: gspread.worksheet.Worksheet, header: str, value: Any) -> List[list]:
+    """Returns all rows for where header has value
+
+    Args:
+        ws: A gspread Worksheet
+        header: Name of the header
+        value: Value to look for in header column
+
+    Returns:
+        A list of list with matching worksheet entries
+    """
+    try:
+        indices = [ind for ind, x in enumerate(get_values_by_header(ws, header)) if x == value]
+        vals = []
+        all_vals = get_values(ws)
+        for ind in indices:
+            vals.append(all_vals[ind])
+
+        return vals
+    except ValueError:
+        return [[]]
