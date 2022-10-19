@@ -13,6 +13,7 @@ from pydantic import BaseModel, AnyHttpUrl
 import pydantic
 import discord
 from discord.ext import commands
+from table2ascii import table2ascii, PresetStyle
 
 from helpers.pydantic_helpers import validate_datetime, validate_time, optional_wrapper
 import helpers.gspread_helpers as gh
@@ -39,20 +40,6 @@ class FEventSubmissions(WSEnum):
     time = 3
     video_link = 4
     powerstage_time = 5
-
-async def get_event_names(ctx: discord.AutocompleteContext) -> List[str]:
-    """Returns list to help autocomplete event names
-
-    Args:
-        ctx: A discord AutocompleteContext
-
-    Returns:
-        A list of events which matches the current text
-    """
-    sh = gh.get_or_create_spreadsheet(gc, EVENT_SH_NAME, EVENT_SH_WRITERS)
-    ws = gh.get_or_create_worksheet(sh, DEvent.title(), DEvent.headers())
-    values = gh.get_values_by_header(ws, DEvent.event_name.name)
-    return [value for value in values if str(values).lower().startswith(ctx.value.lower())]
 
 
 class EventSubmissionModel(BaseModel):
@@ -119,11 +106,13 @@ class EventCommands(commands.Cog):
             return
 
         gh.safe_append_row(ws, row_entry)
-        await ctx.send_response(f"Added '{event_name}' as an event", ephemeral=True)
+        await ctx.send_response(
+            f"Added '{event_name}' as an event {'with' if has_powerstage else 'without'} powerstage",
+            ephemeral=True
+        )
 
     @event_cmd_group.command()
-    @discord.option("event_name", description="Enter the name of the event",
-                    autocomplete=get_event_names)  # TODO: auto-complete is broken, but waiting for fix from pycord.
+    @discord.option("event_name", description="Enter the name of the event")
     @discord.option("time", description="Enter your time in format [H:]MM:SS.ff")
     @discord.option("video_link", description="Enter a HTTP/HTTPS URL to your recording")
     @discord.option("powerstage_time", description="Enter your powerstage time in format [H:]MM:SS.ff", required=False)
@@ -168,7 +157,8 @@ class EventCommands(commands.Cog):
             return
 
         # If the exact entry already exists in the event submission fact table, reject and inform the user
-        if gh.get_first_row_where_header(f_event_sub_ws, FEventSubmissions.video_link.name, event_submission.video_link):
+        if gh.get_first_row_where_header(f_event_sub_ws, FEventSubmissions.video_link.name,
+                                         event_submission.video_link):
             await ctx.followup.send(
                 f"Submission rejected :x: Video link {video_link} has already been submitted.",
                 ephemeral=True
@@ -177,9 +167,19 @@ class EventCommands(commands.Cog):
 
         # If the event has a powerstage and the powerstage time was not entered, reject.
         event_row = gh.get_first_row_where_header(d_event_ws, DEvent.event_name.name, event_submission.event_name)
-        if event_row and gh.str2bool(event_row[DEvent.has_powerstage.value]) and not powerstage_time:
+        event_has_powerstage = gh.str2bool(event_row[DEvent.has_powerstage.value])
+        if event_has_powerstage and not powerstage_time:
             await ctx.followup.send(
                 f"Submission rejected :x: Event {event_name} requires powerstage_time to be entered",
+                ephemeral=True
+            )
+            return
+
+        # If event does not have a powerstage, but powerstage time was entered, reject
+        if not event_has_powerstage and powerstage_time:
+            await ctx.followup.send(
+                f"Submission rejected :x: Event {event_name} does not have a powerstage. Hence powerstage time "
+                f"should not be entered",
                 ephemeral=True
             )
             return
@@ -192,6 +192,55 @@ class EventCommands(commands.Cog):
             ephemeral=True,
         )
 
+    @event_cmd_group.command()
+    @discord.option("event_name", description="Enter the name of the event")
+    @discord.option("public", description="If the posted standings should be visible to everyone",
+                    required=False, default=False)
+    async def standings(self, ctx: discord.ApplicationContext, event_name: str, public: bool):
+        """Command to get standings for an event
+
+        Args:
+            ctx: A discord ApplicationContext
+            event_name: A name of an event
+            public: If the results of the call should be shared publicly or not
+        """
+        await ctx.defer(ephemeral=not public)
+        f_event_sub_ws = gh.get_or_create_worksheet(self.sh, FEventSubmissions.title(),
+                                                    FEventSubmissions.headers())
+
+        # Get all times for specified event
+        event_subs = gh.get_rows_where_header(f_event_sub_ws, FEventSubmissions.event_name.name, event_name)
+
+        # if the event has no submissions return
+        if not any(event_name in event_sub for event_sub in event_subs):
+            await ctx.followup.send(f"Event '{event_name}' has no submissions", ephemeral=True)
+            return
+
+        # Sort times from lowest to highest
+        sorted_subs = sorted(event_subs, key=lambda x: x[FEventSubmissions.time.value])
+
+        # Filter out top time per user
+        filtered_subs = []
+        processed_users = set()
+        for row in sorted_subs:
+            user = row[FEventSubmissions.user_name.value]
+            if user in processed_users:
+                continue
+            processed_users.add(user)
+            filtered_subs.append(row)
+
+        # Format table
+        ranked_subs = [[i + 1] + x for i, x in enumerate(filtered_subs)]
+        table = table2ascii(
+            header=["rank"] + FEventSubmissions.headers(),
+            body=ranked_subs,
+            style=PresetStyle.thin_compact
+        )
+        await ctx.followup.send(
+            f"Standings for {event_name} \n```{table}```\n",
+            ephemeral=True,
+        )
+
     @spreadsheet.error
     async def spreadsheet_error(self, ctx: discord.ApplicationContext, error: Exception):
         """Error handling for /event spreadsheet. Sends the error message to the caller
@@ -200,7 +249,8 @@ class EventCommands(commands.Cog):
             ctx: A discord ApplicationContext
             error: An exception
         """
-        await ctx.send_response(f":warning: Unexpected error when calling /event spreadsheet: {str(error)}", ephemeral=True)
+        await ctx.send_response(f":warning: Unexpected error when calling /event spreadsheet: {str(error)}",
+                                ephemeral=True)
 
     @add.error
     async def add_error(self, ctx: discord.ApplicationContext, error: Exception):
@@ -221,6 +271,17 @@ class EventCommands(commands.Cog):
             error: An exception
         """
         await ctx.followup.send(f":warning: Unexpected error when calling /event submit: {str(error)}", ephemeral=True)
+
+    @standings.error
+    async def standings_error(self, ctx: discord.ApplicationContext, error: Exception):
+        """Error handling for /event standings. Sends the error message to the caller
+
+        Args:
+            ctx: A discord ApplicationContext
+            error: An exception
+        """
+        await ctx.followup.send(f":warning: Unexpected error when calling /event standings: {str(error)}",
+                                ephemeral=True)
 
 
 def setup(bot: discord.Bot):
